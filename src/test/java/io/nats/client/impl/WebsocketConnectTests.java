@@ -16,10 +16,14 @@ package io.nats.client.impl;
 import io.nats.client.*;
 import io.nats.client.support.HttpRequest;
 import io.nats.client.utils.CloseOnUpgradeAttempt;
+import io.nats.client.utils.ResourceUtils;
 import io.nats.client.utils.RunProxy;
 import io.nats.client.utils.TestBase;
 import nats.io.NatsServerRunner;
 import org.junit.jupiter.api.Test;
+import org.testcontainers.containers.NginxContainer;
+import org.testcontainers.images.builder.Transferable;
+import org.testcontainers.utility.MountableFile;
 
 import javax.net.ssl.SSLContext;
 import java.io.IOException;
@@ -333,5 +337,57 @@ public class WebsocketConnectTests extends TestBase {
                 Nats.connect(options);
             }
         });
+    }
+
+    @Test
+    public void testSecureWebsocketBehindTLSTerminatingProxy() throws Exception {
+        int natsWebsocketPort = NatsTestServer.nextPort();
+        try (NatsTestServer ts = new NatsTestServer(null, getWebsocketConfig(natsWebsocketPort), 0, false);
+             NginxContainer<?> nginxContainer = runNginxContainer(natsWebsocketPort)) {
+            String proxySecureWebsocketURL = "wss://" + nginxContainer.getHost() + ":" + nginxContainer.getMappedPort(443);
+            SSLContext ctx = TestSSLUtils.createTestSSLContext();
+            assertCanConnect(
+                    Options.builder()
+                            .server(proxySecureWebsocketURL)
+                            .sslContext(ctx)
+                            .build()
+            );
+        }
+    }
+
+    @Test
+    public void testWebsocketBehindProxy() throws Exception {
+        int natsWebsocketPort = NatsTestServer.nextPort();
+        try (NatsTestServer ts = new NatsTestServer(null, getWebsocketConfig(natsWebsocketPort), 0, false);
+             NginxContainer<?> nginxContainer = runNginxContainer(natsWebsocketPort)) {
+            String proxyWebsocketURL = "ws://" + nginxContainer.getHost() + ":" + nginxContainer.getMappedPort(80);
+            assertCanConnect(
+                    Options.builder()
+                            .server(proxyWebsocketURL)
+                            .build()
+            );
+        }
+    }
+
+    NginxContainer<?> runNginxContainer(int proxyTargetPort) {
+        String proxyTargetURL = "http://host.testcontainers.internal:" + proxyTargetPort;
+        String baseConfig = ResourceUtils.resourceAsString("nginx/base.conf");
+        String modifiedConfig = baseConfig.replace("PROXY_TARGET_URL", proxyTargetURL);
+        org.testcontainers.Testcontainers.exposeHostPorts(proxyTargetPort);
+        NginxContainer<?> nginx = new NginxContainer<>("nginx:1.23.4-alpine")
+                .withCopyFileToContainer(MountableFile.forClasspathResource("certs/"), "/etc/ssl/")
+                .withCopyToContainer(Transferable.of(modifiedConfig), "/etc/nginx/conf.d/default.conf")
+                .withExposedPorts(80, 443);
+        nginx.start();
+        return nginx;
+    }
+
+    public static String[] getWebsocketConfig(int websocketPort) {
+        return new String[] {
+                "websocket {",
+                "  listen: \"localhost:" + websocketPort + "\"",
+                "  no_tls: true",
+                "}"
+        };
     }
 }
